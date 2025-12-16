@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter_tts/flutter_tts.dart';
@@ -8,7 +9,9 @@ import 'package:syncfusion_flutter_pdfviewer/pdfviewer.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-const String GEMINI_API_KEY = "AIzaSyAmGUkVrsqea4q7XMDVBZjADtVdN3V3M6c";
+const String OPENROUTER_API_KEY = "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";
+const String OPENROUTER_MODEL = "deepseek/deepseek-chat";
+const String SYSTEM_PROMPT = "You are a helpful AI assistant. You must reply ONLY in Bengali. Use simple, natural Bengali.";
 
 void main() {
   runApp(const MyApp());
@@ -127,7 +130,7 @@ class _HomeState extends State<Home> {
         elevation: 8,
         destinations: List.generate(
           4,
-          (i) => NavigationDestination(
+              (i) => NavigationDestination(
             icon: Icon(icons[i]),
             selectedIcon: Icon(icons[i], size: 28),
             label: labels[i],
@@ -217,46 +220,47 @@ class _ChatScreenState extends State<ChatScreen> with SingleTickerProviderStateM
   }
 
   Future<String?> _callGemini(String text) async {
-    final prompt = "You are a helpful Bengali assistant. Answer in Bengali concisely and naturally:\n$text";
-    final url = Uri.parse('https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$GEMINI_API_KEY'
-);
+    // Use OpenRouter API with deepseek/deepseek-chat model
+    final url = Uri.parse('https://openrouter.ai/api/v1/chat/completions');
 
     try {
       final resp = await http.post(
         url,
-        headers: {'Content-Type': 'application/json'},
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $OPENROUTER_API_KEY',
+        },
         body: jsonEncode({
-          'contents': [
-            {
-              'parts': [
-                {'text': prompt}
-              ]
-            }
+          'model': OPENROUTER_MODEL,
+          'messages': [
+            {'role': 'system', 'content': SYSTEM_PROMPT},
+            {'role': 'user', 'content': text},
           ],
-          'generationConfig': {
-            'temperature': 0.7,
-            'topK': 40,
-            'topP': 0.95,
-            'maxOutputTokens': 1024,
-          }
+          'temperature': 0.7,
+          'max_tokens': 1024,
         }),
       ).timeout(const Duration(seconds: 30));
 
-      debugPrint('========== GEMINI API DEBUG ==========');
+      debugPrint('========== OPENROUTER API DEBUG ==========');
       debugPrint('Status Code: ${resp.statusCode}');
       debugPrint('Response Body: ${resp.body}');
-      debugPrint('======================================');
+      debugPrint('==========================================');
 
       if (resp.statusCode != 200) {
-        debugPrint('❌ API Error ${resp.statusCode}: ${resp.body}');
+        debugPrint('API Error ${resp.statusCode}: ${resp.body}');
+        final apiMessage = _extractApiErrorMessage(resp.body);
         if (resp.statusCode == 400) {
-          _showSnack('API Key সমস্যা! অনুগ্রহ করে সঠিক API Key ব্যবহার করুন।');
+          _showSnack('রিকুয়েস্টে সমস্যা হয়েছে (400)। বিস্তারিত: $apiMessage');
+        } else if (resp.statusCode == 401 || resp.statusCode == 403) {
+          _showSnack('API Key সঠিক নয় বা অনুমতি নেই (${resp.statusCode})। OpenRouter থেকে Key যাচাই করুন।');
         } else if (resp.statusCode == 404) {
-          _showSnack('API Endpoint সমস্যা। অ্যাপ আপডেট করুন।');
+          _showSnack('ব্যবহৃত মডেল বা এন্ডপয়েন্ট পাওয়া যায়নি (404)। অ্যাপ বা মডেল কনফিগারেশন আপডেট করুন।');
         } else if (resp.statusCode == 429) {
           _showSnack('API Limit অতিক্রম হয়েছে। একটু পরে চেষ্টা করুন।');
+        } else if (resp.statusCode >= 500) {
+          _showSnack('সার্ভার-পক্ষের ত্রুটি (${resp.statusCode})। কিছুক্ষণ পরে আবার চেষ্টা করুন।');
         } else {
-          _showSnack('API Error: ${resp.statusCode}');
+          _showSnack('API ত্রুটি (${resp.statusCode}): $apiMessage');
         }
         return null;
       }
@@ -264,40 +268,43 @@ class _ChatScreenState extends State<ChatScreen> with SingleTickerProviderStateM
       final j = jsonDecode(resp.body);
       debugPrint('Parsed JSON: $j');
 
-      if (j is Map && j.containsKey('candidates')) {
-        final candidates = j['candidates'] as List;
-        debugPrint('Candidates count: ${candidates.length}');
-        
-        if (candidates.isNotEmpty) {
-          final candidate = candidates[0];
-          debugPrint('First candidate: $candidate');
-          
-          if (candidate['content'] != null && candidate['content']['parts'] != null) {
-            final parts = candidate['content']['parts'] as List;
-            debugPrint('Parts count: ${parts.length}');
-            
-            if (parts.isNotEmpty && parts[0]['text'] != null) {
-              final text = parts[0]['text'].toString().trim();
-              debugPrint('✅ Extracted text: $text');
-              return text;
-            } else {
-              debugPrint('❌ No text in parts');
-            }
+      if (j is Map && j.containsKey('choices')) {
+        final choices = j['choices'] as List;
+        debugPrint('Choices count: ${choices.length}');
+
+        if (choices.isNotEmpty) {
+          final choice = choices[0];
+          debugPrint('First choice: $choice');
+
+          if (choice['message'] != null && choice['message']['content'] != null) {
+            final text = choice['message']['content'].toString().trim();
+            debugPrint('Extracted text: $text');
+            return text;
           } else {
-            debugPrint('❌ No content/parts in candidate');
+            debugPrint('No content in message');
           }
         } else {
-          debugPrint('❌ Candidates array is empty');
+          debugPrint('Choices array is empty');
         }
       } else {
-        debugPrint('❌ No candidates key in response');
+        debugPrint('No choices key in response');
       }
-      
+
+      return null;
+    } on TimeoutException catch (e, stackTrace) {
+      debugPrint('Timeout in _callGemini: $e');
+      debugPrint('Stack trace: $stackTrace');
+      _showSnack('সার্ভারের উত্তর পেতে দেরি হচ্ছে। কিছুক্ষণ পরে আবার চেষ্টা করুন।');
+      return null;
+    } on SocketException catch (e, stackTrace) {
+      debugPrint('Network error in _callGemini: $e');
+      debugPrint('Stack trace: $stackTrace');
+      _showSnack('ইন্টারনেট সংযোগ যাচাই করুন এবং আবার চেষ্টা করুন।');
       return null;
     } catch (e, stackTrace) {
-      debugPrint('❌ Exception in _callGemini: $e');
+      debugPrint('Unexpected exception in _callGemini: $e');
       debugPrint('Stack trace: $stackTrace');
-      _showSnack('Error: $e');
+      _showSnack('অপ্রত্যাশিত ত্রুটি ঘটেছে: $e');
       return null;
     }
   }
@@ -320,6 +327,18 @@ class _ChatScreenState extends State<ChatScreen> with SingleTickerProviderStateM
         SnackBar(content: Text(msg), duration: const Duration(seconds: 3)),
       );
     }
+  }
+
+  String _extractApiErrorMessage(String body) {
+    try {
+      final j = jsonDecode(body);
+      if (j is Map && j['error'] is Map && (j['error'] as Map)['message'] is String) {
+        return (j['error'] as Map)['message'] as String;
+      }
+    } catch (_) {
+      // ignore JSON parse errors
+    }
+    return 'অজানা ত্রুটি'; // unknown error
   }
 
   Widget _bubble(Map<String, dynamic> m, int index) {
@@ -348,12 +367,12 @@ class _ChatScreenState extends State<ChatScreen> with SingleTickerProviderStateM
           decoration: BoxDecoration(
             gradient: isUser
                 ? LinearGradient(
-                    colors: isDark
-                        ? [const Color(0xFFBA68C8), const Color(0xFF9C27B0)]
-                        : [const Color(0xFF6A1B9A), const Color(0xFFAB47BC)],
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                  )
+              colors: isDark
+                  ? [const Color(0xFFBA68C8), const Color(0xFF9C27B0)]
+                  : [const Color(0xFF6A1B9A), const Color(0xFFAB47BC)],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            )
                 : null,
             color: isUser ? null : (isDark ? Colors.grey[800] : Colors.grey[200]),
             borderRadius: BorderRadius.only(
@@ -446,40 +465,40 @@ class _ChatScreenState extends State<ChatScreen> with SingleTickerProviderStateM
             Expanded(
               child: _messages.isEmpty
                   ? Center(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(
-                            Icons.chat_bubble_outline_rounded,
-                            size: 80,
-                            color: theme.colorScheme.primary.withOpacity(0.3),
-                          ),
-                          const SizedBox(height: 16),
-                          Text(
-                            'নমস্কার! আমি আপনার সহায়ক',
-                            style: TextStyle(
-                              fontSize: 20,
-                              fontWeight: FontWeight.w500,
-                              color: theme.colorScheme.onBackground.withOpacity(0.6),
-                            ),
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                            'আপনার প্রশ্ন জিজ্ঞাসা করুন...',
-                            style: TextStyle(
-                              fontSize: 16,
-                              color: theme.colorScheme.onBackground.withOpacity(0.4),
-                            ),
-                          ),
-                        ],
-                      ),
-                    )
-                  : ListView.builder(
-                      controller: _scroll,
-                      padding: const EdgeInsets.symmetric(vertical: 8),
-                      itemCount: _messages.length,
-                      itemBuilder: (_, i) => _bubble(_messages[i], i),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(
+                      Icons.chat_bubble_outline_rounded,
+                      size: 80,
+                      color: theme.colorScheme.primary.withOpacity(0.3),
                     ),
+                    const SizedBox(height: 16),
+                    Text(
+                      'নমস্কার! আমি আপনার সহায়ক',
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w500,
+                        color: theme.colorScheme.onBackground.withOpacity(0.6),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'আপনার প্রশ্ন জিজ্ঞাসা করুন...',
+                      style: TextStyle(
+                        fontSize: 16,
+                        color: theme.colorScheme.onBackground.withOpacity(0.4),
+                      ),
+                    ),
+                  ],
+                ),
+              )
+                  : ListView.builder(
+                controller: _scroll,
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                itemCount: _messages.length,
+                itemBuilder: (_, i) => _bubble(_messages[i], i),
+              ),
             ),
             if (_typing)
               Container(
@@ -583,13 +602,13 @@ class _ChatScreenState extends State<ChatScreen> with SingleTickerProviderStateM
                             alignment: Alignment.center,
                             child: _loading
                                 ? const SizedBox(
-                                    width: 24,
-                                    height: 24,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                      valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                                    ),
-                                  )
+                              width: 24,
+                              height: 24,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                              ),
+                            )
                                 : const Icon(Icons.send_rounded, color: Colors.white, size: 24),
                           ),
                         ),
@@ -681,7 +700,7 @@ class _PdfQaScreenState extends State<PdfQaScreen> {
   Future<void> _ask() async {
     final excerpt = _excerptCtrl.text.trim();
     final question = _questionCtrl.text.trim();
-    
+
     if (question.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('প্রশ্ন লিখুন।')),
@@ -728,54 +747,119 @@ class _PdfQaScreenState extends State<PdfQaScreen> {
   }
 
   Future<String?> _callGemini(String prompt) async {
-    final url = Uri.parse(
-      'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$GEMINI_API_KEY',
-    );
-    
-    final resp = await http.post(
-      url,
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({
-        'contents': [
-          {
-            'parts': [
-              {'text': prompt}
-            ]
-          }
-        ],
-        'generationConfig': {
-          'temperature': 0.7,
-          'maxOutputTokens': 1024,
-        }
-      }),
-    );
-
-    debugPrint('PDF->Gemini status=${resp.statusCode}');
-
-    if (resp.statusCode != 200) {
-      debugPrint('PDF Gemini error: ${resp.body}');
-      return null;
-    }
+    // Use OpenRouter API with deepseek/deepseek-chat model
+    final url = Uri.parse('https://openrouter.ai/api/v1/chat/completions');
 
     try {
-      final j = jsonDecode(resp.body);
-      if (j is Map && j.containsKey('candidates')) {
-        final candidates = j['candidates'] as List;
-        if (candidates.isNotEmpty) {
-          final candidate = candidates[0];
-          if (candidate['content'] != null && candidate['content']['parts'] != null) {
-            final parts = candidate['content']['parts'] as List;
-            if (parts.isNotEmpty && parts[0]['text'] != null) {
-              return parts[0]['text'].toString().trim();
+      final resp = await http
+          .post(
+        url,
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $OPENROUTER_API_KEY',
+        },
+        body: jsonEncode({
+          'model': OPENROUTER_MODEL,
+          'messages': [
+            {'role': 'system', 'content': SYSTEM_PROMPT},
+            {'role': 'user', 'content': prompt},
+          ],
+          'temperature': 0.7,
+          'max_tokens': 1024,
+        }),
+      )
+          .timeout(const Duration(seconds: 30));
+
+      debugPrint('PDF->OpenRouter status=${resp.statusCode}');
+      debugPrint('PDF->OpenRouter body=${resp.body}');
+
+      if (resp.statusCode != 200) {
+        final apiMessage = _extractPdfApiErrorMessage(resp.body);
+        debugPrint('PDF OpenRouter error: ${resp.statusCode} $apiMessage');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('PDF API তে সমস্যা (${resp.statusCode}): $apiMessage'),
+              duration: const Duration(seconds: 3),
+            ),
+          );
+        }
+        return null;
+      }
+
+      try {
+        final j = jsonDecode(resp.body);
+        if (j is Map && j.containsKey('choices')) {
+          final choices = j['choices'] as List;
+          if (choices.isNotEmpty) {
+            final choice = choices[0];
+            if (choice['message'] != null && choice['message']['content'] != null) {
+              return choice['message']['content'].toString().trim();
             }
           }
         }
+        return null;
+      } catch (e) {
+        debugPrint('PDF parse error: $e');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('PDF থেকে প্রাপ্ত ডেটা বোঝা যায়নি। আবার চেষ্টা করুন।'),
+              duration: Duration(seconds: 3),
+            ),
+          );
+        }
+        return null;
+      }
+    } on TimeoutException catch (e, stackTrace) {
+      debugPrint('PDF Timeout in _callGemini: $e');
+      debugPrint('Stack trace: $stackTrace');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('PDF উত্তর পেতে দেরি হচ্ছে। কিছুক্ষণ পরে আবার চেষ্টা করুন।'),
+            duration: Duration(seconds: 3),
+          ),
+        );
       }
       return null;
-    } catch (e) {
-      debugPrint('PDF parse error: $e');
+    } on SocketException catch (e, stackTrace) {
+      debugPrint('PDF Network error in _callGemini: $e');
+      debugPrint('Stack trace: $stackTrace');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('ইন্টারনেট সংযোগ যাচাই করুন এবং আবার চেষ্টা করুন।'),
+            duration: Duration(seconds: 3),
+          ),
+        );
+      }
+      return null;
+    } catch (e, stackTrace) {
+      debugPrint('PDF Unexpected exception in _callGemini: $e');
+      debugPrint('Stack trace: $stackTrace');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('PDF API তে অপ্রত্যাশিত ত্রুটি ঘটেছে।'),
+            duration: Duration(seconds: 3),
+          ),
+        );
+      }
       return null;
     }
+  }
+
+  String _extractPdfApiErrorMessage(String body) {
+    try {
+      final j = jsonDecode(body);
+      if (j is Map && j['error'] is Map && (j['error'] as Map)['message'] is String) {
+        return (j['error'] as Map)['message'] as String;
+      }
+    } catch (_) {
+      // ignore JSON parse errors
+    }
+    return 'অজানা ত্রুটি';
   }
 
   @override
@@ -874,38 +958,38 @@ class _PdfQaScreenState extends State<PdfQaScreen> {
           Expanded(
             child: _pdfFile != null
                 ? SfPdfViewer.file(
-                    _pdfFile!,
-                    pageLayoutMode: PdfPageLayoutMode.single,
-                  )
+              _pdfFile!,
+              pageLayoutMode: PdfPageLayoutMode.single,
+            )
                 : Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(
-                          Icons.picture_as_pdf_rounded,
-                          size: 80,
-                          color: theme.colorScheme.primary.withOpacity(0.3),
-                        ),
-                        const SizedBox(height: 16),
-                        Text(
-                          'PDF আপলোড করুন',
-                          style: TextStyle(
-                            fontSize: 20,
-                            fontWeight: FontWeight.w500,
-                            color: theme.colorScheme.onBackground.withOpacity(0.6),
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        Text(
-                          'ডকুমেন্ট নির্বাচন করুন এবং প্রশ্ন করুন',
-                          style: TextStyle(
-                            fontSize: 16,
-                            color: theme.colorScheme.onBackground.withOpacity(0.4),
-                          ),
-                        ),
-                      ],
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(
+                    Icons.picture_as_pdf_rounded,
+                    size: 80,
+                    color: theme.colorScheme.primary.withOpacity(0.3),
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    'PDF আপলোড করুন',
+                    style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.w500,
+                      color: theme.colorScheme.onBackground.withOpacity(0.6),
                     ),
                   ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'ডকুমেন্ট নির্বাচন করুন এবং প্রশ্ন করুন',
+                    style: TextStyle(
+                      fontSize: 16,
+                      color: theme.colorScheme.onBackground.withOpacity(0.4),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
           Container(
             padding: const EdgeInsets.all(16),
@@ -1017,13 +1101,13 @@ class _PdfQaScreenState extends State<PdfQaScreen> {
                         ),
                         child: _loading
                             ? const SizedBox(
-                                width: 20,
-                                height: 20,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                                ),
-                              )
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                          ),
+                        )
                             : const Text('জিজ্ঞাসা করুন', style: TextStyle(color: Colors.white)),
                       ),
                     ),
